@@ -1,0 +1,12 @@
+.git
+.github
+.pytest_cache
+__pycache__
+*.egg-info
+.venv
+venv
+chaos.yaml
+.troop-journal.jsonl
+.troop-backups
+.troop-stop
+*.jsonl

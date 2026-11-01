@@ -1,0 +1,50 @@
+# Copy to chaos.yaml and edit. Nothing runs against a tenant without `run --execute`.
+#
+# Run the troop two ways, same engine behind both:
+#   troop run baboon --tenant prod-canary --execute
+#   troop-web      # then open http://127.0.0.1:8077/docs  (Swagger UI)
+
+# --- Tenants -----------------------------------------------------------------
+# Dynatrace auth is per-environment: each tenant has its own base_url and its own
+# scoped API token. Give each one an id and reference its token via an env var
+# (preferred) rather than writing the secret here. Pick one at run time with
+# --tenant <id>; with a single tenant it is used automatically.
+tenants:
+  - id: prod-canary
+    base_url: "https://ENV1.live.dynatrace.com"
+    token_env: "DT_TOKEN_PROD"            # export DT_TOKEN_PROD=dt0c01.XXXX
+    canary_scopes:
+      - "MZ-CANARY-0000000000000000"      # a management zone holding ONLY canary entities
+      # - "HOST-CANARY00000000"           # a canary host id, to arm Saki (monitoring-mode)
+      # - "canary-token"                  # pseudo-scope, to arm Tarsier (token revoke)
+      # - "canary-synthetic"              # pseudo-scope, to arm Vervet (synthetic disable)
+    required_tag: "chaos-canary"          # objects must carry this tag to be eligible
+
+  - id: staging
+    base_url: "https://ENV2.live.dynatrace.com"
+    token_env: "DT_TOKEN_STAGING"
+    canary_scopes:
+      - "MZ-CANARY-1111111111111111"
+    required_tag: "chaos-canary"
+
+default_tenant: "prod-canary"             # used when --tenant is omitted
+
+# NOTE: "token" here is an ordinary scoped API token. Dynatrace's OneAgent
+# *tenant token* is something else entirely; rotating it is the Kong action and
+# is permanently disabled — the tool has no code path that can touch it.
+
+# (Legacy single-tenant shape still works: a top-level base_url/token/canary_scopes
+#  with no `tenants:` block is read as one tenant called "default".)
+
+# --- Safety ------------------------------------------------------------------
+kill_switch_path: ".troop-stop"           # create this file to halt + force revert
+max_ttl_seconds: 1800                     # nothing stays mutated longer than this
+journal_path: ".troop-journal.jsonl"      # write-ahead journal (revert source)
+backup_dir: ".troop-backups"              # full snapshot of anything a monkey removes,
+                                          # written BEFORE the change, under <dir>/<run_id>/
+
+# Minimum API token scopes (per tenant):
+#   settings.read, settings.write, events.ingest, problems.read, auditLogs.read
+#   (+ apiTokens.read/write for Tarsier, ExternalSyntheticIntegration for Vervet)
+# The tool never needs (and the HTTP client cannot perform) OneAgent tenant-token
+# rotation, bucket deletion, anonymization, or billing queries.

@@ -1,0 +1,32 @@
+# --- secrets & runtime state (NEVER commit) ---
+chaos.yaml                 # may hold tokens / tenant ids; commit chaos.example.yaml only
+OpenClaw.txt               # transient file created during push; never commit
+openclaw.txt
+*[Oo]pen[Cc]law*.txt
+.troop-journal.jsonl       # write-ahead journal (live run state)
+.troop-backups/            # pre-removal config snapshots
+.troop-stop                # kill-switch file
+*.jsonl
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.tox/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- editors / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
