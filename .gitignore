@@ -5,6 +5,8 @@ openclaw.txt
 *[Oo]pen[Cc]law*.txt
 .troop-journal.jsonl       # write-ahead journal (live run state)
 .troop-backups/            # pre-removal config snapshots
+.troop-canary.json         # canary provisioning manifest (tenant object ids)
+.troop-results.jsonl       # run results feeding `troop report`
 .troop-stop                # kill-switch file
 *.jsonl
 

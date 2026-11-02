@@ -26,6 +26,8 @@ class DynatraceClient(Protocol):
 
     # --- fault injection ---
     def ingest_event(self, payload: dict[str, Any]) -> None: ...
+    def ingest_metric(self, lines: str) -> None: ...
+    def ingest_log(self, payload: list[dict[str, Any]]) -> None: ...
 
     # --- the oracle ---
     def recent_problems(self, since_ms: int) -> list[dict[str, Any]]: ...
@@ -33,6 +35,11 @@ class DynatraceClient(Protocol):
     # --- preflight (doctor) ---
     def ping(self) -> bool: ...
     def token_scopes(self) -> list[str]: ...
+
+    # --- schema verification (verify) ---
+    def schema_ids(self) -> list[str]: ...
+    def validate_object(self, schema_id: str, scope: str,
+                        value: dict[str, Any]) -> list[str]: ...
 
     # --- the watcher's oracle: was the change recorded? ---
     def audit_events(self, since_ms: int) -> list[dict[str, Any]]: ...
@@ -73,6 +80,9 @@ class DryRunClient:
     def create_object(self, schema_id: str, scope: str, value: dict[str, Any]) -> str:
         oid = f"DRYRUN-{schema_id}-{len(self.writes)}"
         self.writes.append(f"CREATE {schema_id}@{scope} -> {oid}")
+        # keep it so a later list_objects/get_object in the same process finds it
+        # (e.g. `canary setup` then `plan` in one run, or the Swagger UI)
+        self.store[oid] = {"objectId": oid, "schemaId": schema_id, "scope": scope, "value": value}
         return oid
 
     def update_object(self, object_id: str, value: dict[str, Any],
@@ -82,9 +92,17 @@ class DryRunClient:
 
     def delete_object(self, object_id: str) -> None:
         self.writes.append(f"DELETE {object_id}")
+        self.store.pop(object_id, None)
 
     def ingest_event(self, payload: dict[str, Any]) -> None:
         self.writes.append(f"INGEST event {payload.get('title', '?')}")
+
+    def ingest_metric(self, lines: str) -> None:
+        self.writes.append(f"INGEST metric {lines.splitlines()[0] if lines else ''}")
+
+    def ingest_log(self, payload: list[dict[str, Any]]) -> None:
+        first = payload[0].get("content", "?") if payload else "?"
+        self.writes.append(f"INGEST log {first}")
 
     def recent_problems(self, since_ms: int) -> list[dict[str, Any]]:
         return []
@@ -119,6 +137,17 @@ class DryRunClient:
     def token_scopes(self) -> list[str]:
         # a dry-run client has no real token; report the least-privilege set
         return ["settings.read", "settings.write", "events.ingest", "problems.read"]
+
+    def schema_ids(self) -> list[str]:
+        # no tenant to ask: claim the schemas the troop knows about so a dry-run
+        # `verify` reports "present (dry-run)" rather than a wall of false misses
+        from .monkeys import FIRE
+        known = {s for cls in FIRE.values() for s in getattr(cls, "schemas", ())}
+        known.add("builtin:management-zones")
+        return sorted(known)
+
+    def validate_object(self, schema_id: str, scope: str, value: dict[str, Any]) -> list[str]:
+        return []   # dry-run: nothing to validate against; treat as acceptable
 
 
 class HttpDynatraceClient:
@@ -182,6 +211,16 @@ class HttpDynatraceClient:
         r = self._c.post("/api/v2/events/ingest", json=payload)
         r.raise_for_status()
 
+    def ingest_metric(self, lines: str) -> None:
+        # Metric ingest uses the line protocol, not JSON.
+        r = self._c.post("/api/v2/metrics/ingest", content=lines,
+                         headers={"Content-Type": "text/plain; charset=utf-8"})
+        r.raise_for_status()
+
+    def ingest_log(self, payload: list[dict[str, Any]]) -> None:
+        r = self._c.post("/api/v2/logs/ingest", json=payload)
+        r.raise_for_status()
+
     def recent_problems(self, since_ms: int) -> list[dict[str, Any]]:
         r = self._c.get("/api/v2/problems", params={"from": f"{since_ms}"})
         r.raise_for_status()
@@ -231,3 +270,31 @@ class HttpDynatraceClient:
         r = self._c.post("/api/v2/apiTokens/lookup", json={"token": self._token})
         r.raise_for_status()
         return r.json().get("scopes", [])
+
+    def schema_ids(self) -> list[str]:
+        r = self._c.get("/api/v2/settings/schemas")
+        r.raise_for_status()
+        return [s.get("schemaId") for s in r.json().get("items", []) if s.get("schemaId")]
+
+    def validate_object(self, schema_id: str, scope: str, value: dict[str, Any]) -> list[str]:
+        # Settings 2.0 validate-only: POST with ?validateOnly=true persists nothing
+        # and returns 200 (valid) or 400 with the schema errors. We never write.
+        r = self._c.post("/api/v2/settings/objects", params={"validateOnly": "true"},
+                         json=[{"schemaId": schema_id, "scope": scope, "value": value}])
+        if r.status_code < 300:
+            return []
+        try:
+            body = r.json()
+        except Exception:
+            return [f"HTTP {r.status_code}"]
+        errors: list[str] = []
+        items = body if isinstance(body, list) else [body]
+        for item in items:
+            for err in (item.get("error", {}).get("constraintViolations")
+                        or item.get("constraintViolations") or []):
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                if msg:
+                    errors.append(msg)
+            if not errors and isinstance(item, dict) and item.get("error", {}).get("message"):
+                errors.append(item["error"]["message"])
+        return errors or [f"HTTP {r.status_code}"]

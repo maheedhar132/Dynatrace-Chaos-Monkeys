@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 
 from ..client import DynatraceClient
-from ..models import Blast, Change, Plan, Reversibility, Target
+from ..models import Blast, Change, Fault, Plan, Reversibility, Target
 from .base import Monkey
 
 CANARY_TAG = "chaos-canary"
@@ -49,36 +49,40 @@ def _canary_updates(client, schema_id, scope, mutate, note, label):
 
 
 class Marmoset(Monkey):
-    """Smallest monkey. Nudges one canary anomaly detector so it stops firing.
+    """Smallest monkey. Disables the canary metric event so a metric spike stops
+    opening a problem.
 
-    Mutation: disable it (or inflate its threshold). Fault: a canary metric/event
-    that would have tripped it. Kill = no problem opens.
+    Mutation: disable the metric event watching `chaos.canary.fault`. Fault: the
+    driver pushes that metric (above threshold). Kill = no problem opens. This is
+    the metric event `canary setup` provisions, so the baseline genuinely fires.
     """
 
     name = "marmoset"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.METRIC     # the driver pushes a canary metric that crosses the metric event
+    schemas = ("builtin:anomaly-detection.metric-events",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
-        objs = client.list_objects("builtin:davis.anomaly-detectors", scope)
+        objs = client.list_objects("builtin:anomaly-detection.metric-events", scope)
         changes: list[Change] = []
         for o in objs:
             if CANARY_TAG not in str(o.get("value", {})):
-                continue  # only touch detectors we marked as canaries
+                continue  # only touch metric events we marked as canaries
             before = copy.deepcopy(o)
             after = copy.deepcopy(o)
             after.setdefault("value", {})["enabled"] = False
             changes.append(Change(
-                target=Target("builtin:davis.anomaly-detectors", o["objectId"], scope,
-                               label=f"{CANARY_TAG} detector"),
-                before=before, after=after, note="disable canary detector",
+                target=Target("builtin:anomaly-detection.metric-events", o["objectId"], scope,
+                               label=f"{CANARY_TAG} metric event"),
+                before=before, after=after, note="disable canary metric event",
             ))
         return Plan(
             monkey=self.name,
-            description="Disable a canary Davis anomaly detector",
+            description="Disable the canary metric event on chaos.canary.fault",
             reversibility=self.reversibility, blast=self.blast, changes=changes,
-            fault="Canary metric crosses the detector's threshold",
-            expected_signal="A Davis event + problem opens",
+            fault="Driver pushes chaos.canary.fault above threshold",
+            expected_signal="A metric-event problem opens",
         )
 
 
@@ -92,6 +96,8 @@ class Baboon(Monkey):
     name = "baboon"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.EVENT      # an ingested ERROR_EVENT opens a problem that routes here
+    schemas = ("builtin:alerting.profile",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         objs = client.list_objects("builtin:alerting.profile", scope)
@@ -127,6 +133,8 @@ class Ape(Monkey):
     name = "ape"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.EVENT      # the problem from an ingested event drives the notification
+    schemas = ("builtin:problem.notifications",)
 
     def __init__(self, delete: bool = False) -> None:
         self.delete = delete
@@ -168,6 +176,8 @@ class Mandrill(Monkey):
     name = "mandrill"
     reversibility = Reversibility.AUTO
     blast = Blast.SCOPE
+    fault = Fault.EVENT      # the window suppresses the problem the injected event opens
+    schemas = ("builtin:alerting.maintenance-window",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         value = {
@@ -203,6 +213,8 @@ class Howler(Monkey):
     name = "howler"
     reversibility = Reversibility.AUTO
     blast = Blast.SCOPE
+    fault = Fault.EVENT      # tests that a new profile routes the injected event's problem
+    schemas = ("builtin:alerting.profile",)
 
     def __init__(self, sink_url: str = "https://example.invalid/chaos-sink") -> None:
         self.sink_url = sink_url
@@ -240,6 +252,8 @@ class Capuchin(Monkey):
     name = "capuchin"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.TRACE      # needs a real tagged entity for the tag-filtered route to apply
+    schemas = ("builtin:tags.auto-tagging",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         changes = _canary_updates(
@@ -267,6 +281,8 @@ class Gibbon(Monkey):
     name = "gibbon"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.TRACE      # needs real load/errors against the canary service
+    schemas = ("builtin:anomaly-detection.services",)
 
     def _blind(self, v: dict) -> None:
         # Representative shape; verify exact keys per tenant schema version.
@@ -298,6 +314,8 @@ class Langur(Monkey):
     name = "langur"
     reversibility = Reversibility.AUTO
     blast = Blast.SCOPE
+    fault = Fault.TRACE      # needs a real entity in the zone for MZ-filtered routing to apply
+    schemas = ("builtin:management-zones",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         def narrow(v: dict) -> None:
@@ -327,6 +345,8 @@ class Colobus(Monkey):
     name = "colobus"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.LOG        # the driver pushes a canary log line into the pipeline
+    schemas = ("builtin:logmonitoring.log-storage-settings",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         def exclude(v: dict) -> None:
@@ -359,6 +379,8 @@ class Saki(Monkey):
     name = "saki"
     reversibility = Reversibility.MANUAL
     blast = Blast.OBJECT
+    fault = Fault.TRACE      # needs a real service erroring on the downgraded host
+    schemas = ("builtin:host.monitoring.mode",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         changes: list[Change] = []
@@ -394,6 +416,8 @@ class Mangabey(Monkey):
     name = "mangabey"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.TRACE      # needs the canary service to actually return 5xx
+    schemas = ("builtin:failure-detection.environment.rules",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         def ignore_5xx(v: dict) -> None:
@@ -428,6 +452,8 @@ class Gelada(Monkey):
     name = "gelada"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.TRACE      # needs a real error burst to move the SLO
+    schemas = ("builtin:monitoring.slo",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         def widen(v: dict) -> None:
@@ -461,6 +487,8 @@ class Tamarin(Monkey):
     name = "tamarin"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.EVENT      # the driver repeats the event so the recurrence is real
+    schemas = ("builtin:anomaly-detection.frequent-issues",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         def suppress(v: dict) -> None:
@@ -495,6 +523,8 @@ class Loris(Monkey):
     name = "loris"
     reversibility = Reversibility.AUTO
     blast = Blast.SCOPE
+    fault = Fault.NONE       # the fault is agent version drift over time; nothing to inject
+    schemas = ("builtin:deployment.oneagent.updates",)
 
     def plan(self, client: DynatraceClient, scope: str) -> Plan:
         changes = _canary_updates(
@@ -527,6 +557,8 @@ class Tarsier(Monkey):
     name = "tarsier"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.NONE       # the 401s happen in the sender outside Dynatrace
+    schemas = ("api-token",)  # not a Settings 2.0 schema; verified via the tokens API
 
     def __init__(self, token_scope: str = "canary-token") -> None:
         self.token_scope = token_scope
@@ -564,6 +596,8 @@ class Vervet(Monkey):
     name = "vervet"
     reversibility = Reversibility.AUTO
     blast = Blast.OBJECT
+    fault = Fault.NONE       # the synthetic monitor must actually run against its target
+    schemas = ("synthetic-monitor",)  # not a Settings 2.0 schema; verified via the synthetic API
 
     def __init__(self, monitor_scope: str = "canary-synthetic") -> None:
         self.monitor_scope = monitor_scope

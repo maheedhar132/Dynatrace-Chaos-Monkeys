@@ -1,0 +1,20 @@
+{
+  "generated_ms": 1793596666351,
+  "runs_total": 4,
+  "runs_scored": 4,
+  "killed": 2,
+  "survived": 1,
+  "inconclusive": 1,
+  "mutation_score": 0.6666666666666666,
+  "dead_config_candidates": [
+    "builtin:alerting.profile[OBJ-2]@MZ-CANARY"
+  ],
+  "load_bearing": [
+    "builtin:alerting.profile[OBJ-0]@MZ-CANARY",
+    "builtin:alerting.profile[OBJ-1]@MZ-CANARY"
+  ],
+  "inconclusive_monkeys": [
+    "mandrill"
+  ],
+  "_source": "simulated (DryRunClient), not a live tenant"
+}

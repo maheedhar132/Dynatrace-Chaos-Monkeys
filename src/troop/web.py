@@ -21,13 +21,18 @@ import os
 from typing import Any, Optional
 
 from .backup import BackupVault
+from .canary import CanaryKit, CanaryManifest
 from .client import DryRunClient, DynatraceClient, HttpDynatraceClient
 from .config import Config, Tenant, load_config
+from .coverage import classify, fault_note, verify_schemas
+from .driver import drive as drive_faults
 from .journal import Journal
-from .models import ExperimentResult, Plan
+from .models import ExperimentResult, Fault, Outcome, Plan, new_run_id
 from .monkeys import FIRE, QUARANTINE, WATCHERS
 from .rampage import choose as rampage_choose
+from .report import ResultStore, result_row, summarize, to_markdown
 from .runner import Runner
+from .selftest import run_selftest
 from .safety import Fence, Guard, SafetyError, assert_executable
 
 CONFIG_ENV = "TROOP_CONFIG"
@@ -63,6 +68,11 @@ def _plan_dict(plan: Plan) -> dict[str, Any]:
     }
 
 
+_KILLED_CAUTION = ("KILLED is a v0 signal, not proof — a merged baseline problem can read as "
+                   "KILLED when detection is fine. Verify by hand. Do NOT wire KILLED into "
+                   "automated remediation, paging, or config deletion yet.")
+
+
 def _result_dict(result: ExperimentResult) -> dict[str, Any]:
     if result.outcome is not None:
         verdict = result.outcome.name
@@ -70,7 +80,7 @@ def _result_dict(result: ExperimentResult) -> dict[str, Any]:
         verdict = "KILLED" if result.killed else "SURVIVED"
     else:
         verdict = None
-    return {
+    out = {
         "monkey": result.monkey,
         "run_id": result.run_id,
         "executed": result.executed,
@@ -82,6 +92,9 @@ def _result_dict(result: ExperimentResult) -> dict[str, Any]:
         "revert_verified": result.revert_verified,
         "messages": result.messages,
     }
+    if result.outcome is Outcome.KILLED:
+        out["caution"] = _KILLED_CAUTION
+    return out
 
 
 def create_app(config_path: Optional[str] = None):
@@ -145,6 +158,11 @@ def create_app(config_path: Optional[str] = None):
         tenant: Optional[str] = None
         execute: bool = False
 
+    class CanaryBody(BaseModel):
+        action: str = Field("status", description="setup | status | teardown")
+        tenant: Optional[str] = None
+        execute: bool = Field(False, description="false = dry-run (nothing is created/deleted)")
+
     def _run_named(name: str, c: Config, tenant: Optional[Tenant], scope: str,
                    dry: bool, ttl: int, backup: bool,
                    oracle_wait: float = 0.0, poll: float = 2.0) -> dict[str, Any]:
@@ -159,19 +177,35 @@ def create_app(config_path: Optional[str] = None):
         client = _client_for(tenant, dry)
         guard = _guard_for(c, tenant, dry)
         vault = BackupVault(c.backup_dir) if backup else None
+        fault = getattr(FIRE[name], "fault", Fault.EVENT)
         try:
             plan = FIRE[name]().plan(client, scope)
             result = Runner(client, guard, Journal(c.journal_path), vault=vault).run(
-                plan, ttl_seconds=ttl, oracle_wait_s=oracle_wait, poll_s=poll)
+                plan, ttl_seconds=ttl, oracle_wait_s=oracle_wait, poll_s=poll, fault_kind=fault)
         except SafetyError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
-        return _result_dict(result)
+        if not dry:
+            try:
+                ResultStore(c.results_path).append(
+                    result_row(result, plan, scope=scope,
+                               tenant=(tenant.id if tenant else "")))
+            except OSError:
+                pass
+        out = _result_dict(result)
+        if result.outcome is Outcome.INCONCLUSIVE and not fault.injectable:
+            out["gated_note"] = fault_note(fault, name)
+        return out
 
     @app.get("/troop", summary="list the whole troop")
     def troop() -> dict[str, Any]:
         return {
-            "fire": {n: {"reversibility": str(c().reversibility), "blast": str(c().blast)}
-                     for n, c in FIRE.items()},
+            "fire": {c.name: {"reversibility": str(FIRE[c.name]().reversibility),
+                              "blast": str(FIRE[c.name]().blast),
+                              "fault": str(c.fault), "drive": str(c.drive), "live": c.live,
+                              "schemas": list(c.schemas)}
+                     for c in classify()},
+            "live_now": [c.name for c in classify() if c.live],
+            "gated": [c.name for c in classify() if not c.live],
             "watchers": list(WATCHERS),
             "quarantine": {n: q.what for n, q in QUARANTINE.items()},
         }
@@ -183,6 +217,85 @@ def create_app(config_path: Optional[str] = None):
                       "canary_scopes": sorted(t.canary_scopes), "required_tag": t.required_tag}
                 for tid, t in c.tenants.items()}
 
+    @app.post("/canary", summary="provision / inspect / remove the canary fixtures")
+    def canary(body: CanaryBody) -> dict[str, Any]:
+        if body.action not in ("setup", "status", "teardown"):
+            raise HTTPException(status_code=400,
+                                detail="action must be setup, status, or teardown")
+        c = cfg()
+        t = tenant_or_400(c, body.tenant)
+        dry = not body.execute
+        client = _client_for(t, dry_run=True) if body.action == "status" else _client_for(t, dry)
+        kit = CanaryKit(client, manifest_path=c.canary_manifest_path, dry_run=dry)
+        lines = {"setup": kit.setup, "status": kit.status, "teardown": kit.teardown}[body.action]()
+        return {"action": body.action, "execute": body.execute,
+                "canary_scope": kit.manifest.mz_scope, "lines": lines}
+
+    @app.post("/drive", summary="inject faults on demand (event/metric/log)")
+    def drive(kind: str = Body("event", embed=True), scope: str = Body("environment", embed=True),
+              count: int = Body(1, embed=True), tenant: Optional[str] = Body(None, embed=True),
+              execute: bool = Body(False, embed=True)) -> dict[str, Any]:
+        try:
+            fault = Fault[kind.upper()]
+        except KeyError:
+            raise HTTPException(status_code=400, detail="kind must be event, metric, or log")
+        c = cfg()
+        t = tenant_or_400(c, tenant)
+        if not execute:
+            return {"dry_run": True, "would_inject": count, "kind": kind, "scope": scope}
+        sent, log = drive_faults(_client_for(t, dry_run=False), fault, scope,
+                                 run_id=new_run_id(), monkey="manual", count=count)
+        return {"injected": sent, "kind": kind, "scope": scope, "log": log}
+
+    @app.post("/selftest", summary="prove the live detectors actually fire (end-to-end)")
+    def selftest(tenant: Optional[str] = Body(None, embed=True),
+                 scope: Optional[str] = Body(None, embed=True),
+                 oracle_wait: float = Body(120.0, embed=True),
+                 poll: float = Body(5.0, embed=True)) -> dict[str, Any]:
+        c = cfg()
+        t = tenant_or_400(c, tenant)
+        live = t is not None and t.live
+        sc = scope or CanaryManifest.load(c.canary_manifest_path).mz_scope
+        if not sc:
+            raise HTTPException(status_code=400,
+                                detail="no canary scope; run canary setup or pass scope")
+        checks = run_selftest(_client_for(t, dry_run=not live), sc,
+                              oracle_wait=oracle_wait, poll=poll)
+        fired = sum(1 for ch in checks if ch.fired)
+        return {
+            "live_tenant": live, "scope": sc, "fired": fired, "total": len(checks),
+            "checks": [{"monkey": ch.monkey, "fault": str(ch.fault),
+                        "fired": ch.fired, "detail": ch.detail} for ch in checks],
+            "note": None if live else "dry-run: no live tenant, so nothing actually fired",
+        }
+
+    @app.get("/report", summary="mutation-score scorecard across runs")
+    def report() -> dict[str, Any]:
+        c = cfg()
+        summary = summarize(ResultStore(c.results_path).rows())
+        summary["markdown"] = to_markdown(summary)
+        return summary
+
+    @app.post("/verify", summary="prove each monkey's schema against the tenant (read-only)")
+    def verify(tenant: Optional[str] = Body(None, embed=True),
+               scope: str = Body("environment", embed=True)) -> dict[str, Any]:
+        c = cfg()
+        t = tenant_or_400(c, tenant)
+        client = _client_for(t, dry_run=True) if (t is None or not t.live) \
+            else HttpDynatraceClient(t.base_url, t.resolve_token())
+        live_tenant = t is not None and t.live
+        checks = verify_schemas(client, scope=scope)
+        return {
+            "live_tenant": live_tenant,
+            "note": None if live_tenant else
+            "dry-run: schemas NOT checked against Dynatrace; pass a live tenant to prove them",
+            "checks": [{"monkey": ch.monkey, "schema": ch.schema_id,
+                        "status": ch.status, "ok": ch.ok, "detail": ch.detail}
+                       for ch in checks],
+            "issues": [{"monkey": ch.monkey, "schema": ch.schema_id, "detail": ch.detail}
+                       for ch in checks if not ch.ok],
+        }
+
     @app.post("/plan", summary="dry-run a monkey (never touches a tenant)")
     def plan(monkey: str = Body(..., embed=True), scope: str = Body("environment", embed=True),
              tenant: Optional[str] = Body(None, embed=True)) -> dict[str, Any]:
@@ -192,7 +305,14 @@ def create_app(config_path: Optional[str] = None):
             raise HTTPException(status_code=404, detail=f"unknown monkey {monkey!r}")
         c = cfg()
         t = tenant_or_400(c, tenant)
-        return _plan_dict(FIRE[monkey]().plan(_client_for(t, dry_run=True), scope))
+        out = _plan_dict(FIRE[monkey]().plan(_client_for(t, dry_run=True), scope))
+        fault = getattr(FIRE[monkey], "fault", Fault.EVENT)
+        out["fault"] = str(fault)
+        out["live"] = fault.injectable
+        note = fault_note(fault, monkey)
+        if note:
+            out["gated_note"] = note
+        return out
 
     @app.post("/run", summary="run one monkey (dry-run unless execute=true)")
     def run(body: RunBody) -> dict[str, Any]:

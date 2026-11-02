@@ -55,6 +55,8 @@ class Config:
     max_ttl_seconds: int = 1800
     backup_dir: str = ".troop-backups"
     journal_path: str = ".troop-journal.jsonl"
+    canary_manifest_path: str = ".troop-canary.json"
+    results_path: str = ".troop-results.jsonl"
 
     def tenant(self, tenant_id: Optional[str]) -> Optional[Tenant]:
         """Pick a tenant by id, or the default/only one when id is None."""
@@ -108,6 +110,8 @@ def parse_config(raw: dict[str, Any]) -> Config:
         max_ttl_seconds=int(raw.get("max_ttl_seconds", 1800)),
         backup_dir=raw.get("backup_dir", ".troop-backups"),
         journal_path=raw.get("journal_path", ".troop-journal.jsonl"),
+        canary_manifest_path=raw.get("canary_manifest_path", ".troop-canary.json"),
+        results_path=raw.get("results_path", ".troop-results.jsonl"),
     )
 
 

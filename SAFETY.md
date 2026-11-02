@@ -52,11 +52,50 @@ into the systems Dynatrace monitors (this is why RUM injection was rejected — 
 9. **Least privilege.** `troop doctor` refuses to bless a token that is missing
    required scopes or carries powerful scopes the tool never needs.
 
+## Do not automate on verdicts (v0)
+
+This is a v0 oracle, and its verdicts are **advisory input for a human**, not
+triggers for machines. In particular, **do not wire `KILLED` into automated
+remediation, paging, or config deletion.** A `KILLED` can be a false positive:
+Dynatrace may merge the re-injected fault into the problem the baseline opened,
+so no *new* problem appears and detection reads as broken when it was fine. The
+tool surfaces this everywhere a verdict is reported — a `messages` line on every
+`KILLED`, a `[CAUTION]` line in the CLI, and a `caution` field in the HTTP
+response — precisely so nobody automates on it prematurely. Likewise, trust a
+`SURVIVED` (delete-candidate) verdict only when you know a real fault exercised
+the config; a `GATED` monkey run without the workload it needs returns
+`INCONCLUSIVE`, which the tool labels, rather than a false `SURVIVED`.
+
 ## Trust boundary / threat model
 
 - **The oracle is the thing to distrust most.** Dynatrace detection has latency;
   set `--oracle-wait` to your Davis window. A `0` wait on a real run is flagged
-  as unreliable. Treat a verdict produced with no wait as advisory only.
+  as unreliable. Treat a verdict produced with no wait as advisory only. The
+  post-mutation check credits only a *new* problem (this run's id, an exact
+  canary-zone match, or the chaos tag) and excludes anything already open at
+  baseline, so a lingering problem can't read as a false `SURVIVED`.
+- **The fault driver injects only synthetic signals.** The driver pushes an
+  `ERROR_EVENT`, a canary metric (`chaos.canary.fault`), or a `chaos-canary` log
+  line — all tagged `chaos`/`chaos.run_id` so they are never mistaken for real
+  telemetry — over the ingest APIs. It never reaches into a monitored system; the
+  reference canary service (`examples/canary_service.py`) is a throwaway workload
+  you run yourself, not something the tool drives inside your estate.
+- **Live vs gated monkeys.** Only EVENT/METRIC/LOG faults are injectable, so those
+  monkeys are live now; `canary setup` also provisions the matching detectors (a
+  metric event, a log event) so the injected fault actually opens a problem.
+  TRACE-gated monkeys need real service traffic — `troop run --drive-canary <url>`
+  generates HTTP load against the reference canary service for the run (it touches
+  nothing in Dynatrace); out-of-band monkeys need the real fault. Otherwise they
+  return `INCONCLUSIVE`. `troop list`, `plan`, `run`, and `rampage` all surface
+  this so a gated monkey never produces a misleading verdict. `troop verify`
+  proves each monkey's schema against your tenant (validate-only; never writes).
+- **Verdicts are advisory, and the report says so.** `troop report` prints the
+  mutation score and the don't-automate caution on every render; a KILLED or
+  SURVIVED verdict is a prompt for human review, never an automation trigger.
+- **`troop selftest` mutates no config.** It injects faults and reads problems to
+  confirm the provisioned detectors actually fire; it changes no settings object.
+  Combined with `--setup`/`--teardown` it can provision and remove the canary
+  around the probe, using the same journalled, backed-up machinery as any run.
 - **Config is data, not instructions.** Objects read from the tenant are never
   executed or trusted as commands.
 - **Secrets.** Tokens come from per-tenant environment variables, never the repo.

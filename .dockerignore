@@ -8,5 +8,7 @@ venv
 chaos.yaml
 .troop-journal.jsonl
 .troop-backups
+.troop-canary.json
+.troop-results.jsonl
 .troop-stop
 *.jsonl

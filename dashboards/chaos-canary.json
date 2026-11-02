@@ -1,0 +1,75 @@
+{
+  "dashboardMetadata": {
+    "name": "Chaos Troop - canary",
+    "shared": false,
+    "owner": "",
+    "tags": ["chaos-canary"],
+    "preset": false,
+    "dashboardFilter": {
+      "timeframe": "-2h"
+    }
+  },
+  "tiles": [
+    {
+      "name": "About",
+      "tileType": "MARKDOWN",
+      "configured": true,
+      "bounds": { "top": 0, "left": 0, "width": 912, "height": 152 },
+      "tileFilter": {},
+      "markdown": "# Chaos Troop - canary\nExperiments that the troop runs land here. Each run drops `CUSTOM_INFO` timeline markers (`Chaos experiment started/ended`) and an `ERROR_EVENT`/metric/log tagged `chaos.run_id`. **Nothing here is a real incident** - it is the tool proving whether your monitoring would have noticed a fault.\n\n- **Fault metric** below spikes when the driver injects a `METRIC` fault (`chaos.canary.fault`).\n- **Problems** shows what Davis opened on the canary zone during a run.\n- Filter the Events view by `chaos.run_id` to follow one run end to end.\n\n_Example dashboard - adjust the management-zone filter and metric selector to your tenant._"
+    },
+    {
+      "name": "Chaos fault metric (chaos.canary.fault)",
+      "tileType": "CUSTOM_CHARTING",
+      "configured": true,
+      "bounds": { "top": 152, "left": 0, "width": 456, "height": 304 },
+      "tileFilter": {},
+      "filterConfig": {
+        "type": "MIXED",
+        "customName": "Chaos fault metric",
+        "defaultName": "chaos.canary.fault",
+        "chartConfig": {
+          "legendShown": true,
+          "type": "TIMESERIES",
+          "series": [
+            {
+              "metric": "chaos.canary.fault",
+              "aggregation": "SUM",
+              "type": "BAR",
+              "entityType": "",
+              "dimensions": [
+                { "id": "0", "name": "monkey", "values": [], "entityDimension": false }
+              ],
+              "sortAscending": false,
+              "sortColumn": true,
+              "aggregationRate": "TOTAL"
+            }
+          ],
+          "resultMetadata": {}
+        },
+        "filtersPerEntityType": {}
+      }
+    },
+    {
+      "name": "Open problems (canary)",
+      "tileType": "OPEN_PROBLEMS",
+      "configured": true,
+      "bounds": { "top": 152, "left": 456, "width": 456, "height": 304 },
+      "tileFilter": {
+        "managementZone": {
+          "id": "REPLACE_WITH_CANARY_MZ_ID",
+          "name": "chaos-canary-zone"
+        }
+      },
+      "filterConfig": null
+    },
+    {
+      "name": "Chaos run markers",
+      "tileType": "MARKDOWN",
+      "configured": true,
+      "bounds": { "top": 456, "left": 0, "width": 912, "height": 152 },
+      "tileFilter": {},
+      "markdown": "## Follow one run\nEvery run emits timeline markers. In **Observe & Explore > Events** (Classic) or with DQL (Latest), filter on `chaos.run_id` to see: `Chaos experiment started` -> the injected fault -> `Chaos experiment ended:<VERDICT>`. A `KILLED` verdict means the mutation broke detection - **verify by hand; do not automate on it in v0.**"
+    }
+  ]
+}

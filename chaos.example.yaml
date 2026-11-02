@@ -14,6 +14,8 @@ tenants:
     base_url: "https://ENV1.live.dynatrace.com"
     token_env: "DT_TOKEN_PROD"            # export DT_TOKEN_PROD=dt0c01.XXXX
     canary_scopes:
+      # Run `troop canary setup --tenant prod-canary --execute` to provision a
+      # canary zone + tagged objects; it prints the id to paste on the next line.
       - "MZ-CANARY-0000000000000000"      # a management zone holding ONLY canary entities
       # - "HOST-CANARY00000000"           # a canary host id, to arm Saki (monitoring-mode)
       # - "canary-token"                  # pseudo-scope, to arm Tarsier (token revoke)
@@ -42,6 +44,7 @@ max_ttl_seconds: 1800                     # nothing stays mutated longer than th
 journal_path: ".troop-journal.jsonl"      # write-ahead journal (revert source)
 backup_dir: ".troop-backups"              # full snapshot of anything a monkey removes,
                                           # written BEFORE the change, under <dir>/<run_id>/
+canary_manifest_path: ".troop-canary.json"  # what `troop canary setup` created (teardown reads it)
 
 # Minimum API token scopes (per tenant):
 #   settings.read, settings.write, events.ingest, problems.read, auditLogs.read

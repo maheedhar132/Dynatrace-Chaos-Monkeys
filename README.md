@@ -76,15 +76,50 @@ docker run --rm -p 8077:8077 ghcr.io/OWNER/dynatrace-chaos-troop   # then open :
 Configure one or more tenants in `chaos.yaml` (copy [`chaos.example.yaml`](chaos.example.yaml)), then:
 
 ```bash
-troop doctor --tenant prod-canary       # preflight: is the setup safe to run?
-troop list                              # the whole troop + verdicts
-troop plan baboon --scope MZ-CANARY     # dry-run: what it would change
-troop run  baboon --scope MZ-CANARY     # still dry-run (no --execute)
-troop run  baboon --scope MZ-CANARY --execute --oracle-wait 600   # real
-troop rampage --seed 7 --scope MZ-CANARY                          # pick one at random (logged)
-troop watch potto --scope MZ-CANARY --execute                     # is the change even recorded?
+troop quickstart --tenant prod-canary                # the ordered path, with your next command spelled out
+troop canary setup --tenant prod-canary --execute    # provision the canary fixtures a run needs
+```
+
+`troop quickstart` reads your config and prints the exact sequence from zero to your first verdict — which steps are done, and the precise command to run next. New here? Start with it.
+
+`canary setup` creates a dedicated `chaos-canary-zone` management zone plus one tagged, zone-scoped object per event-drivable monkey (alerting profile, problem notification, Davis detector, auto-tag rule), writes a manifest of exactly what it made, and prints the `canary_scopes:` line to paste into `chaos.yaml`. This is what keeps a first run from coming back empty. `troop canary teardown --execute` removes precisely those objects again. Without `--execute` it is a dry-run preview.
+
+```bash
+troop verify   --tenant prod-canary     # prove each monkey's schema on YOUR tenant (read-only)
+troop selftest --tenant prod-canary     # prove the live detectors actually FIRE (end-to-end smoke)
+troop doctor   --tenant prod-canary     # preflight: is the setup safe to run?
+troop list                              # the troop + which monkeys are LIVE vs GATED
+troop plan baboon --scope <canary-zone-id>     # dry-run: what it would change
+troop run  baboon --scope <canary-zone-id>     # still dry-run (no --execute)
+troop run  baboon --scope <canary-zone-id> --execute --oracle-wait 600   # real
+troop rampage --seed 7 --scope <canary-zone-id>                          # pick one at random (live-only)
+troop report --md report.md --json report.json                          # mutation-score scorecard
+troop watch potto --scope <canary-zone-id> --execute                     # is the change even recorded?
 troop restore --execute                 # replay the journal, put everything back
 ```
+
+`<canary-zone-id>` is the scope `troop canary setup` printed (and `troop canary status` re-prints).
+
+**The fault driver — what makes a verdict real.** A monkey mutates config; the [fault driver](src/troop/driver.py) injects the fault that config is supposed to catch, so the oracle can see if it still does. Three fault kinds are injected over the Dynatrace ingest APIs, so **7 monkeys are live** with no extra setup: `EVENT` (events ingest → a problem opens: `baboon`, `ape`, `mandrill`, `howler`, `tamarin`), `METRIC` (metrics ingest → a metric event trips: `marmoset`), and `LOG` (logs ingest → a log event fires: `colobus`). You can also fire faults by hand: `troop drive --kind metric --scope <id> --count 10 --execute`.
+
+Crucially, `canary setup` provisions the **matching detectors**, not just the mutation targets — a metric event watching `chaos.canary.fault` (the one `marmoset` disables) and a log event on `chaos-canary` (the one `colobus`'s exclusion is meant to blind). Without them a metric/log fault would land but nothing would watch for it, so the baseline could never fire. With them, the live monkeys genuinely open a problem.
+
+**Prove the detectors fire before you trust a verdict — `troop selftest`.** A schema-valid detector can still fail to *trip*; only a live tenant tells you. `troop selftest` injects each live fault and checks a problem actually opened — the whole loop, end to end, mutating no config. `[ OK ]` per monkey means it works on your tenant; a `[FAIL]` points you at the detector or push cadence to tune (the known-good config and tuning guide is [`docs/detectors.md`](docs/detectors.md)). Run it once and "never run live" is retired.
+
+The remaining **9 are gated**: 6 need `TRACE` — real request traffic against an OneAgent-monitored service (a synthetic signal can't move a response-time baseline or a failure rate), and 3 are out-of-band (a dead token, a frozen agent, a synthetic run). For the `TRACE` ones, run the **reference canary service** and let a run drive it for you:
+
+```bash
+python examples/canary_service.py --port 8099                 # a service you can break on command (run under OneAgent)
+troop run gibbon --scope <id> --execute --oracle-wait 600 --drive-canary http://localhost:8099
+```
+
+`--drive-canary` generates real failing/slow traffic against the service for the duration of the run, so the baseline has something to detect. `troop list` labels every monkey `LIVE`/`GATED` and names its fault kind; `troop plan`/`run` warn before a gated monkey runs; `rampage` picks live-only unless you pass `--include-gated` — so you never burn a run wondering why it came back `INCONCLUSIVE`.
+
+**The scorecard.** `troop run`/`rampage` append each verdict to a results file; `troop report` turns the campaign into the thing a team acts on — a **mutation score** (killed / decided) plus the list of dead-config candidates and load-bearing config, as Markdown and JSON. `--since 7d` scopes it to a window and `--trend` adds the score-by-day table (the number means more as a trend than a snapshot). A committed example (generated against the in-memory simulation, not a live tenant) is in [`examples/sample-report.md`](examples/sample-report.md).
+
+**Prove the schemas on your tenant first.** Settings 2.0 object shapes vary by tenant and version, so several monkeys ship representative shapes marked "verify on tenant." `troop verify` checks every monkey's schema against your tenant's catalog and validate-only-submits the canary shapes (**it never writes**), so you know before you run which monkeys fit your tenant and which need a one-line tweak. The maintainers have not run this against a live Dynatrace tenant — `troop verify` is how you, with a tenant, get that proof.
+
+**See the runs land in Dynatrace.** Every run drops `CUSTOM_INFO` timeline markers and a `chaos.run_id`-tagged fault; [`dashboards/chaos-canary.json`](dashboards/chaos-canary.json) (classic) plus the DQL in [`dashboards/README.md`](dashboards/README.md) (Latest) surface them so an operator watches the experiments, not just the CLI.
 
 ```bash
 troop-web      # then open http://127.0.0.1:8077/docs  (Swagger UI, same engine)
@@ -95,6 +130,8 @@ PYTHONPATH=src python examples/watch_demo.py  # observable vs blind-spot, no ten
 **Fire monkeys** ask *"did detection survive the break?"* → **KILLED** (load-bearing), **SURVIVED** (dead config), or **INCONCLUSIVE** when the baseline never fired or the detection window elapsed — a run the tool can't decide is never quietly called SURVIVED. **Watchers** ask *"was the change even observable?"* → **OBSERVABLE** or **BLIND SPOT** — the direct test of the "recorded ≠ noticed" gap (see [`docs/monkey-lineup.md`](docs/monkey-lineup.md) §A).
 
 Nothing touches a tenant without `--execute`, a configured canary fence, and a plan the guard approves. Detection has latency, so set `--oracle-wait` to your Davis window; a `0` wait on a real run is flagged as unreliable. Create a file named `.troop-stop` to halt and force a revert.
+
+**The oracle only credits a problem that is actually ours and actually new.** A problem counts toward the verdict only if it carries this run's id, sits on the canary scope by *exact* management-zone match, or is chaos-tagged — a bare substring mention of the scope does not. Any problem already open at baseline, or one that opened before the fault was injected, is excluded from the post-mutation check, so a lingering problem can't masquerade as fresh detection and read as a false `SURVIVED`. When a run comes back `KILLED` but a baseline problem is still open, it says so: Dynatrace may have merged the re-injected fault into the existing problem, and you should verify before acting on it. This is a v0 oracle — honest about what it can and can't attribute, which matters more than being confident.
 
 ---
 
@@ -166,6 +203,8 @@ for each config element in scope:
 | ❓ **INCONCLUSIVE**: baseline never fired, or the detection window elapsed | Can't decide — often the **monitoring is already broken** (baseline case) | 🚨 the baseline case is the most valuable finding of all |
 
 The tool reports `INCONCLUSIVE` rather than ever collapsing "I couldn't tell" into `SURVIVED`. **Mutation score** = killed / (killed + survived). A low score means a lot of your config isn't actually doing anything.
+
+> ⚠️ **Do not automate on a verdict yet.** This is a v0 oracle. A `KILLED` can be a false positive — Dynatrace may have *merged* the re-injected fault into the baseline problem, so detection was actually fine; the run says so when it happens, and the CLI, the `messages`, and the API's `caution` field all repeat it. Treat every verdict as a prompt for a human to review, **never** as a trigger for automated remediation, paging, or config deletion. Earn that automation later, once you trust the oracle on your tenant.
 
 ## 3. How Dynatrace works: the pipeline
 

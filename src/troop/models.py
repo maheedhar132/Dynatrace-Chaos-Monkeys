@@ -45,6 +45,58 @@ class Verdict(enum.Enum):
         return self.value
 
 
+class Fault(enum.Enum):
+    """The kind of fault that drives a monkey's baseline — what the fault driver
+    must inject for detection to even have a chance to fire.
+
+    EVENT, METRIC and LOG can be injected synthetically over the Dynatrace ingest
+    APIs (events / metrics / logs), so those monkeys are **live now** — the driver
+    drives them end to end. TRACE needs real request traffic against an
+    OneAgent-monitored service (run the reference canary in `examples/`, or
+    `troop drive` your own). NONE means the fault originates entirely outside
+    Dynatrace (a dead token, a frozen agent, a synthetic monitor that must run)
+    and nothing can inject it. A monkey whose fault is not injectable returns
+    INCONCLUSIVE from the tool alone — surfaced at runtime, never a false verdict.
+    """
+
+    EVENT = "event"      # an ingested ERROR_EVENT opens a problem
+    METRIC = "metric"    # an ingested canary metric crosses a detector threshold
+    LOG = "log"          # an ingested canary log line hits a log pipeline
+    TRACE = "trace"      # real service traffic (needs an OneAgent-monitored canary)
+    NONE = "none"        # the fault happens outside Dynatrace; nothing to inject
+
+    def __str__(self) -> str:
+        return self.name
+
+    @property
+    def injectable(self) -> bool:
+        """True when the fault driver can synthesize this fault (so it's live now)."""
+        return self in (Fault.EVENT, Fault.METRIC, Fault.LOG)
+
+
+class Drive(enum.Enum):
+    """The coarse live-vs-gated bucket, derived from a monkey's `Fault` kind.
+
+    EVENT = the driver can exercise it now; TRAFFIC = needs a real workload
+    (TRACE fault); EXTERNAL = the fault is out-of-band (NONE). See `coverage`.
+    """
+
+    EVENT = "event"        # live now: the fault driver injects its fault
+    TRAFFIC = "traffic"    # gated: needs real service traffic (reference canary)
+    EXTERNAL = "external"  # gated: the fault originates outside Dynatrace
+
+    def __str__(self) -> str:
+        return self.name
+
+    @property
+    def live(self) -> bool:
+        return self is Drive.EVENT
+
+    @property
+    def label(self) -> str:
+        return "live" if self is Drive.EVENT else "gated"
+
+
 class Outcome(enum.Enum):
     """The result of one experiment. The third state is the important one.
 
